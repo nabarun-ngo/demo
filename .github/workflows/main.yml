@@ -2,8 +2,8 @@ name: Election Results Change Tracker
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/15 * * * *"   # every 15 min
+  #schedule:
+   # - cron: "*/15 * * * *"   # every 15 min
 
 jobs:
   track-results:
