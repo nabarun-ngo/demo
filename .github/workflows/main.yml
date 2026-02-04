@@ -1,4 +1,4 @@
-name: Fetch Election Results (Upload When Changed)
+name: Fetch Election Results (Log + Artifact)
 
 on:
   workflow_dispatch:
@@ -10,18 +10,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Login + Fetch Election Results
-        id: fetch
+      # ================================
+      # STEP 1: LOGIN
+      # ================================
+      - name: Login to ElectionRunner
+        id: login
         env:
           LOGIN_URL: "https://electionrunner.com/api/auth/login"
-          RESULTS_URL: "https://electionrunner.com/api/elections/452621/results"
-
           EMAIL: ${{ secrets.ELECTIONRUNNER_EMAIL }}
           PASSWORD: ${{ secrets.ELECTIONRUNNER_PASSWORD }}
-
         run: |
           echo "==============================="
-          echo "➡️ Logging in to ElectionRunner"
+          echo "➡️ STEP 1: Logging in..."
           echo "==============================="
 
           LOGIN_RESPONSE=$(curl -s "$LOGIN_URL" \
@@ -40,13 +40,24 @@ jobs:
             exit 1
           fi
 
-          echo "✅ Token retrieved successfully"
+          echo "✅ Login successful"
 
+          # Export token
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+      # ================================
+      # STEP 2: FETCH RESULTS
+      # ================================
+      - name: Fetch Election Results
+        id: fetch
+        env:
+          RESULTS_URL: "https://electionrunner.com/api/elections/452621/results"
+          TOKEN: ${{ steps.login.outputs.token }}
+        run: |
           echo "==============================="
-          echo "➡️ Fetching Election Results"
+          echo "➡️ STEP 2: Fetching election results..."
           echo "==============================="
 
-          # Call results API and capture HTTP status
           STATUS=$(curl -s -o results.json -w "%{http_code}" "$RESULTS_URL" \
             -H "accept: application/json, text/plain, */*" \
             -H "authorization: Bearer $TOKEN" \
@@ -56,27 +67,41 @@ jobs:
 
           echo "HTTP Status: $STATUS"
 
-          # Export status for next step
+          # Export status
           echo "status=$STATUS" >> $GITHUB_OUTPUT
 
-          # If status is 304 → no upload
+          # ----------------------------
+          # If no changes
+          # ----------------------------
           if [ "$STATUS" = "304" ]; then
-            echo "⚠️ No changes (304 Not Modified)."
+            echo "⚠️ No changes (304 Not Modified)"
             exit 0
           fi
 
-          # If not success
+          # ----------------------------
+          # If failure
+          # ----------------------------
           if [ "$STATUS" != "200" ]; then
             echo "❌ Failed to fetch results"
             cat results.json
             exit 1
           fi
 
-          echo "✅ New results found (200 OK)"
+          # ----------------------------
+          # Print JSON in logs
+          # ----------------------------
+          echo "==============================="
+          echo "✅ New Results Found!"
+          echo "📌 JSON Response:"
+          echo "==============================="
 
-      # ✅ Upload artifact only if status != 304
+          cat results.json
+
+      # ================================
+      # STEP 3: UPLOAD ARTIFACT
+      # ================================
       - name: Upload Results JSON Artifact
-        if: steps.fetch.outputs.status == '304'
+        if: steps.fetch.outputs.status != '200'
         uses: actions/upload-artifact@v4
         with:
           name: election-results-${{ github.run_id }}
