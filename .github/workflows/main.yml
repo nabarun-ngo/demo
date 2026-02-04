@@ -1,15 +1,21 @@
-name: Fetch Election Results (Log + Artifact)
+name: Election Results Change Tracker
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes
+    - cron: "*/15 * * * *"   # every 15 min
 
 jobs:
-  fetch-results:
+  track-results:
     runs-on: ubuntu-latest
 
     steps:
+      # ================================
+      # STEP 0: Checkout Repo
+      # ================================
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       # ================================
       # STEP 1: LOGIN
       # ================================
@@ -20,29 +26,21 @@ jobs:
           EMAIL: ${{ secrets.ELECTIONRUNNER_EMAIL }}
           PASSWORD: ${{ secrets.ELECTIONRUNNER_PASSWORD }}
         run: |
-          echo "==============================="
-          echo "➡️ STEP 1: Logging in..."
-          echo "==============================="
+          echo "➡️ Logging in..."
 
           LOGIN_RESPONSE=$(curl -s "$LOGIN_URL" \
             -H "accept: application/json, text/plain, */*" \
             -H "content-type: application/json" \
-            -H "origin: https://app.electionrunner.com" \
-            -H "referer: https://app.electionrunner.com/" \
-            -H "er-version: v3.9.6-8-gff28033" \
             --data-raw "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}")
 
           TOKEN=$(echo "$LOGIN_RESPONSE" | jq -r '.token')
 
           if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-            echo "❌ Login failed:"
-            echo "$LOGIN_RESPONSE"
+            echo "❌ Login failed"
             exit 1
           fi
 
-          echo "✅ Login successful"
-
-          # Export token
+          echo "✅ Login success"
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
       # ================================
@@ -54,55 +52,69 @@ jobs:
           RESULTS_URL: "https://electionrunner.com/api/elections/452621/results"
           TOKEN: ${{ steps.login.outputs.token }}
         run: |
-          echo "==============================="
-          echo "➡️ STEP 2: Fetching election results..."
-          echo "==============================="
-
-          STATUS=$(curl -s -o results.json -w "%{http_code}" "$RESULTS_URL" \
-            -H "accept: application/json, text/plain, */*" \
+          echo "➡️ Fetching results..."
+          curl -s "$RESULTS_URL" \
+            -H "accept: application/json" \
             -H "authorization: Bearer $TOKEN" \
-            -H "origin: https://app.electionrunner.com" \
-            -H "referer: https://app.electionrunner.com/" \
-            -H "er-version: v3.9.6-8-gff28033")
+            -o latest-results.json
 
-          echo "HTTP Status: $STATUS"
+          echo "✅ Results downloaded"
 
-          # Export status
-          echo "status=$STATUS" >> $GITHUB_OUTPUT
+      # ================================
+      # STEP 3: COMPARE WITH LAST SNAPSHOT
+      # ================================
+      - name: Detect Change
+        id: compare
+        run: |
+          TIMESTAMP=$(date -u "+%Y-%m-%d %H:%M:%S UTC")
 
-          # ----------------------------
-          # If no changes
-          # ----------------------------
-          if [ "$STATUS" = "304" ]; then
-            echo "⚠️ No changes (304 Not Modified)"
+          # File where last snapshot is stored
+          SNAPSHOT_FILE="snapshot.json"
+
+          # If snapshot does not exist yet
+          if [ ! -f "$SNAPSHOT_FILE" ]; then
+            echo "📌 No previous snapshot found. Saving first snapshot."
+            cp latest-results.json $SNAPSHOT_FILE
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "change_time=$TIMESTAMP" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # ----------------------------
-          # If failure
-          # ----------------------------
-          if [ "$STATUS" != "200" ]; then
-            echo "❌ Failed to fetch results"
-            cat results.json
-            exit 1
+          # Compare JSON files
+          if cmp -s latest-results.json $SNAPSHOT_FILE; then
+            echo "✅ No change detected at $TIMESTAMP"
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "🔥 RESULTS CHANGED at $TIMESTAMP"
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "change_time=$TIMESTAMP" >> $GITHUB_OUTPUT
+
+            echo "📌 New JSON:"
+            cat latest-results.json
+
+            # Update snapshot
+            cp latest-results.json $SNAPSHOT_FILE
           fi
 
-          # ----------------------------
-          # Print JSON in logs
-          # ----------------------------
-          echo "==============================="
-          echo "✅ New Results Found!"
-          echo "📌 JSON Response:"
-          echo "==============================="
-
-          cat results.json
-
       # ================================
-      # STEP 3: UPLOAD ARTIFACT
+      # STEP 4: UPLOAD ARTIFACT WHEN CHANGED
       # ================================
-      - name: Upload Results JSON Artifact
-        if: steps.fetch.outputs.status != '200'
+      - name: Upload Changed Results Artifact
+        if: steps.compare.outputs.changed == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: election-results-${{ github.run_id }}
-          path: results.json
+          name: election-results-changed-${{ github.run_id }}
+          path: latest-results.json
+
+      # ================================
+      # STEP 5: COMMIT UPDATED SNAPSHOT BACK TO REPO
+      # ================================
+      - name: Commit Snapshot Update
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+          git add snapshot.json
+          git commit -m "Election results changed at ${{ steps.compare.outputs.change_time }}"
+          git push
